@@ -11,9 +11,13 @@ import (
 )
 
 type SlackProgress struct {
-	UserToken      string
-	SlackChannel   string
-	MessagePrefix  string
+	UserToken    string
+	SlackChannel string
+
+	StatusPrefix string
+	Animation    []string
+	StatusString string
+
 	StopChan       chan interface{}
 	ErrorChan      chan error
 	CurrentMessage *SlackMessage
@@ -55,12 +59,19 @@ var httpClient = http.Client{}
 func (p *SlackProgress) Start() {
 	p.StopChan = make(chan interface{}, 1)
 	p.ErrorChan = make(chan error, 1)
+	if p.Animation == nil {
+		p.Animation = []string{"|", "/", "--", "\\", "|", "/", "--", "\\"}
+	}
 	go p.runProgress()
 }
 
 func (p *SlackProgress) runProgress() {
-	spinners := []string{"|", "/", "--", "\\", "|", "/", "--", "\\"}
-	response, err := p.createMessage(p.MessagePrefix + spinners[0])
+	text := p.StatusPrefix
+	spinnerIdx := 0
+	if len(p.Animation) > 0 {
+		text += p.Animation[spinnerIdx]
+	}
+	response, err := p.createMessage(text)
 	if err != nil {
 		p.ErrorChan <- err
 		return
@@ -79,16 +90,19 @@ func (p *SlackProgress) runProgress() {
 	}()
 	go p.monitorHistory(response.Channel)
 
-	spinnerIdx := 1
 	for {
 		select {
 		case <-time.After(500 * time.Millisecond):
-			_, err := p.updateMessage(response.Message.Ts, response.Channel, p.MessagePrefix+spinners[spinnerIdx])
+			spinnerFrame := ""
+			if len(p.Animation) > 0 {
+				spinnerIdx = (spinnerIdx + 1) % len(p.Animation)
+				spinnerFrame = p.Animation[spinnerIdx]
+			}
+			_, err := p.updateMessage(response.Message.Ts, response.Channel, "*"+p.StatusPrefix+"* *"+spinnerFrame+"* "+p.StatusString)
 			if err != nil {
 				p.ErrorChan <- err
 				return
 			}
-			spinnerIdx = (spinnerIdx + 1) % len(spinners)
 		case <-p.StopChan:
 			return
 		}

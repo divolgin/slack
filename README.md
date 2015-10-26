@@ -15,21 +15,22 @@ import (
 
 func main() {
 	p := &slack.SlackProgress{
-		UserToken: "<slack token>",
+		UserToken:    "<slack token>",
 		SlackChannel: "#channel-name", // or "@username"
+    StatusPrefix: "dev",
 	}
 
 	p.Start() // this will start a progress spinner in the specified channel
 
 	go func() {
 		// Change progress text every 5 seconds
-		p.MessagePrefix = "message 1... "
+		p.StatusString = "message 1... "
 		time.Sleep(5 * time.Second)
-		p.MessagePrefix = "message 2... "
+		p.StatusString = "message 2... "
 		time.Sleep(5 * time.Second)
-		p.MessagePrefix = "message 3... "
+		p.StatusString = "message 3... "
 		time.Sleep(5 * time.Second)
-		p.MessagePrefix = "message 4... "
+		p.StatusString = "message 4... "
 	}()
 
 	select {
