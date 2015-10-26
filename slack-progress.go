@@ -98,7 +98,7 @@ func (p *SlackProgress) runProgress() {
 				spinnerIdx = (spinnerIdx + 1) % len(p.Animation)
 				spinnerFrame = p.Animation[spinnerIdx]
 			}
-			_, err := p.updateMessage(response.Message.Ts, response.Channel, "*"+p.StatusPrefix+"* *"+spinnerFrame+"* "+p.StatusString)
+			_, err := p.updateMessage(response.Message.Ts, response.Channel, "*"+p.StatusPrefix+"* *"+spinnerFrame+"* ```"+p.StatusString+"```")
 			if err != nil {
 				p.ErrorChan <- err
 				return

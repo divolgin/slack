@@ -17,7 +17,7 @@ func main() {
 	p := &slack.SlackProgress{
 		UserToken:    "<slack token>",
 		SlackChannel: "#channel-name", // or "@username"
-    StatusPrefix: "dev",
+		StatusPrefix: "dev",
 	}
 
 	p.Start() // this will start a progress spinner in the specified channel
