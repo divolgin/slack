@@ -18,6 +18,7 @@ type SlackProgress struct {
 	Animation    []string
 	StatusString string
 
+	resetChan      chan interface{}
 	StopChan       chan interface{}
 	ErrorChan      chan error
 	CurrentMessage *SlackMessage
@@ -66,6 +67,8 @@ func (p *SlackProgress) Start() {
 }
 
 func (p *SlackProgress) runProgress() {
+	p.resetChan = make(chan interface{}, 1)
+
 	text := p.StatusPrefix
 	spinnerIdx := 0
 	if len(p.Animation) > 0 {
@@ -84,10 +87,10 @@ func (p *SlackProgress) runProgress() {
 
 	p.CurrentMessage = &response.Message
 
-	defer func() {
-		p.deleteMessage(p.CurrentMessage.Ts, response.Channel)
+	defer func(ts, channel string) {
+		p.deleteMessage(ts, channel)
 		p.CurrentMessage = nil
-	}()
+	}(response.Ts, response.Channel)
 	go p.monitorHistory(response.Channel)
 
 	for {
@@ -105,33 +108,40 @@ func (p *SlackProgress) runProgress() {
 			}
 		case <-p.StopChan:
 			return
+		case <-p.resetChan:
+			go p.runProgress()
+			return
 		}
 	}
 }
 
 func (p *SlackProgress) monitorHistory(channel string) {
 	for {
-		time.Sleep(5 * time.Second)
-		if p.CurrentMessage == nil {
-			continue
-		}
-
-		response, err := p.channelHistory(p.CurrentMessage.Ts, channel)
-		if err != nil {
-			// TODO: logging
+		select {
+		case <-p.StopChan:
 			return
-		}
 
-		if !response.Ok {
-			// TODO: logging
-			return
-		}
+		case <-time.After(5 * time.Second):
+			curMessage := p.CurrentMessage
+			if curMessage == nil {
+				continue
+			}
 
-		if len(response.Messages) > 2 {
-			p.StopChan <- nil
-			time.Sleep(1 * time.Second) // there's a tiny race condition here
-			go p.runProgress()
-			return
+			response, err := p.channelHistory(curMessage.Ts, channel)
+			if err != nil {
+				// TODO: logging
+				return
+			}
+
+			if !response.Ok {
+				// TODO: logging
+				return
+			}
+
+			if len(response.Messages) > 2 {
+				close(p.resetChan)
+				return
+			}
 		}
 	}
 }
