@@ -1,16 +1,16 @@
 package slack
 
 import (
-	"encoding/json"
-	"fmt"
-	"io/ioutil"
-	"net/http"
-	"net/url"
-	"strings"
+	"log"
 	"time"
+
+	"github.com/pkg/errors"
+	"github.com/slack-go/slack"
 )
 
 type SlackProgress struct {
+	client *slack.Client
+
 	UserToken    string
 	SlackChannel string
 
@@ -25,39 +25,30 @@ type SlackProgress struct {
 }
 
 type SlackMessage struct {
-	Test     string `json:"text"`
-	Username string `json:"username"`
-	Type     string `json:"type"`
-	Subtype  string `json:"subtype"`
-	Ts       string `json:"ts"`
+	Text    string
+	Channel string
+	Ts      string
 }
 
 type SlackCreateResponse struct {
-	Ok      bool         `json:"ok"`
-	Channel string       `json:"channel"`
-	Ts      string       `json:"ts"`
-	Message SlackMessage `json:"message"`
-	Error   string       `json:"error"`
+	Channel string `json:"channel"`
+	Ts      string `json:"ts"`
 }
 
 type SlackUpdateResponse struct {
-	Ok      bool   `json:"ok"`
 	Channel string `json:"channel"`
 	Ts      string `json:"ts"`
 	Text    string `json:"text"`
-	Error   string `json:"error"`
 }
 
 type SlackHistoryResponse struct {
-	Ok       bool           `json:"ok"`
-	Latest   string         `json:"latest"`
-	Messages []SlackMessage `json:"messages"`
-	HasMore  bool           `json:"has_more"`
+	Latest   string          `json:"latest"`
+	Messages []slack.Message `json:"messages"`
 }
 
-var httpClient = http.Client{}
-
 func (p *SlackProgress) Start() {
+	p.client = slack.New(p.UserToken)
+
 	p.StopChan = make(chan interface{}, 1)
 	p.ErrorChan = make(chan error, 1)
 	if p.Animation == nil {
@@ -80,18 +71,17 @@ func (p *SlackProgress) runProgress() {
 		return
 	}
 
-	if !response.Ok {
-		p.ErrorChan <- fmt.Errorf("Could not send message to slack: %s", response.Error)
-		return
+	p.CurrentMessage = &SlackMessage{
+		Text:    text,
+		Channel: response.Channel,
+		Ts:      response.Ts,
 	}
 
-	p.CurrentMessage = &response.Message
-
-	defer func(ts, channel string) {
-		p.deleteMessage(ts, channel)
+	defer func() {
+		p.deleteMessage(p.CurrentMessage.Ts, p.CurrentMessage.Channel)
 		p.CurrentMessage = nil
-	}(response.Ts, response.Channel)
-	go p.monitorHistory(response.Channel)
+	}()
+	go p.monitorHistory()
 
 	for {
 		select {
@@ -101,7 +91,7 @@ func (p *SlackProgress) runProgress() {
 				spinnerIdx = (spinnerIdx + 1) % len(p.Animation)
 				spinnerFrame = p.Animation[spinnerIdx]
 			}
-			_, err := p.updateMessage(response.Message.Ts, response.Channel, "*"+p.StatusPrefix+"* *"+spinnerFrame+"* ```"+p.StatusString+"```")
+			_, err := p.updateMessage("*" + p.StatusPrefix + "* *" + spinnerFrame + "* ```" + p.StatusString + "```")
 			if err != nil {
 				p.ErrorChan <- err
 				return
@@ -115,26 +105,20 @@ func (p *SlackProgress) runProgress() {
 	}
 }
 
-func (p *SlackProgress) monitorHistory(channel string) {
+func (p *SlackProgress) monitorHistory() {
 	for {
 		select {
 		case <-p.StopChan:
 			return
 
 		case <-time.After(5 * time.Second):
-			curMessage := p.CurrentMessage
-			if curMessage == nil {
+			if p.CurrentMessage == nil {
 				continue
 			}
 
-			response, err := p.channelHistory(curMessage.Ts, channel)
+			response, err := p.channelHistory()
 			if err != nil {
-				// TODO: logging
-				return
-			}
-
-			if !response.Ok {
-				// TODO: logging
+				log.Println("Error getting history, messages will not be moved:", err)
 				return
 			}
 
@@ -147,96 +131,51 @@ func (p *SlackProgress) monitorHistory(channel string) {
 }
 
 func (p *SlackProgress) createMessage(text string) (*SlackCreateResponse, error) {
-	url := fmt.Sprintf("https://slack.com/api/chat.postMessage?token=%s&channel=%s&text=%s&pretty=1&as_user=1",
-		url.QueryEscape(p.UserToken),
-		url.QueryEscape(p.SlackChannel),
-		url.QueryEscape(text))
-	body, err := callSlack(url)
+	channel, timestamp, err := p.client.PostMessage(p.SlackChannel, slack.MsgOptionText(text, false))
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "post message")
 	}
 
-	var response SlackCreateResponse
-	if err := json.Unmarshal(body, &response); err != nil {
-		return nil, err
-	}
-
-	return &response, nil
+	return &SlackCreateResponse{
+		Channel: channel,
+		Ts:      timestamp,
+	}, nil
 }
 
-func (p *SlackProgress) updateMessage(ts, channel, text string) (*SlackUpdateResponse, error) {
-	url := fmt.Sprintf("https://slack.com/api/chat.update?token=%s&channel=%s&ts=%s&text=%s",
-		url.QueryEscape(p.UserToken),
-		url.QueryEscape(channel),
-		url.QueryEscape(ts),
-		url.QueryEscape(text))
-	body, err := callSlack(url)
+func (p *SlackProgress) updateMessage(text string) (*SlackUpdateResponse, error) {
+	channel, ts, text, err := p.client.UpdateMessage(p.CurrentMessage.Channel, p.CurrentMessage.Ts, slack.MsgOptionText(text, false))
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "update message")
 	}
 
-	var response SlackUpdateResponse
-	if err := json.Unmarshal(body, &response); err != nil {
-		return nil, err
-	}
-
-	return &response, nil
+	return &SlackUpdateResponse{
+		Channel: channel,
+		Ts:      ts,
+		Text:    text,
+	}, nil
 }
 
 func (p *SlackProgress) deleteMessage(ts, channel string) error {
-	url := fmt.Sprintf("https://slack.com/api/chat.delete?token=%s&channel=%s&ts=%s",
-		url.QueryEscape(p.UserToken),
-		url.QueryEscape(channel),
-		url.QueryEscape(ts))
-	_, err := callSlack(url)
+	_, _, err := p.client.DeleteMessage(channel, ts)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "delete message")
 	}
 
 	return nil
 }
 
-func (p *SlackProgress) channelHistory(ts, channel string) (*SlackHistoryResponse, error) {
-	// Why can't Slack use the same function for channels and people???
-	apiFunc := "im.history"
-	if strings.HasPrefix(p.SlackChannel, "#") {
-		apiFunc = "channels.history"
-	}
-
-	url := fmt.Sprintf("https://slack.com/api/%s?token=%s&channel=%s&oldest=%s&count=3",
-		apiFunc,
-		url.QueryEscape(p.UserToken),
-		url.QueryEscape(channel),
-		url.QueryEscape(ts))
-	body, err := callSlack(url)
+func (p *SlackProgress) channelHistory() (*SlackHistoryResponse, error) {
+	history, err := p.client.GetConversationHistory(&slack.GetConversationHistoryParameters{
+		ChannelID: p.SlackChannel,
+		Oldest:    p.CurrentMessage.Ts,
+		Limit:     3,
+	})
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "get conversation history")
 	}
 
-	var response SlackHistoryResponse
-	if err := json.Unmarshal(body, &response); err != nil {
-		return nil, err
-	}
-
-	return &response, nil
-}
-
-func callSlack(url string) ([]byte, error) {
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-
-	defer resp.Body.Close()
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	return body, nil
+	return &SlackHistoryResponse{
+		Latest:   history.Latest,
+		Messages: history.Messages,
+	}, nil
 }
